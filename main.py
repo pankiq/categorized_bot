@@ -1,62 +1,65 @@
 import asyncio
 import logging
-import pytz
-import random
 from datetime import datetime
+from aiogram import Bot, Dispatcher
+from aiogram.enums import ParseMode
+from aiogram.client.default import DefaultBotProperties
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from config import bot, CHAT_ID
-from state import USED_LORE_FACTS, LAST_MESSAGE_TIME
-from utils.texts import LORE_FACTS
+# Импортируем настройки и переменные
+from config import BOT_TOKEN
+from state import ACTIVE_DUELS
+from database import load_duels
+
+# Импортируем роутеры (твои новые файлы)
+from handlers import moderation, games, ai, user, admin
 from utils.funcs import send_morning_voice, log_to_owner
-from middlewares import AntiFloodMiddleware
 
-# Импорт роутеров
-from aiogram import Dispatcher
-from handlers import admin, user, games, ai, moderation
-
+# Логирование
 logging.basicConfig(level=logging.INFO)
-dp = Dispatcher()
-
-# Подключаем роутеры (важен порядок!)
-dp.include_router(admin.router)
-dp.include_router(user.router)
-dp.include_router(games.router)
-dp.include_router(ai.router)
-dp.include_router(moderation.router) # Модерация в конце, т.к. ловит все сообщения
-
-dp.message.middleware(AntiFloodMiddleware())
-
-async def check_silence_loop():
-    """Фоновая задача для отправки фактов, если в чате тихо"""
-    global USED_LORE_FACTS, LAST_MESSAGE_TIME
-    while True:
-        await asyncio.sleep(300)
-        if (datetime.now() - LAST_MESSAGE_TIME).total_seconds() > 3600:
-            if len(USED_LORE_FACTS) >= len(LORE_FACTS): USED_LORE_FACTS = []
-            
-            avail = [i for i in range(len(LORE_FACTS)) if i not in USED_LORE_FACTS]
-            if avail:
-                idx = random.choice(avail)
-                USED_LORE_FACTS.append(idx)
-                try:
-                    await bot.send_message(CHAT_ID, f"📢 <b>Минутка Лора:</b>\n{LORE_FACTS[idx]}")
-                    LAST_MESSAGE_TIME = datetime.now()
-                except Exception as e:
-                    print(f"Lore error: {e}")
 
 async def main():
-    print("Бот запускается...")
-    
-    # Планировщик
+    # Инициализация бота
+    bot = Bot(
+        token=BOT_TOKEN, 
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML)
+    )
+    dp = Dispatcher()
+
+    # ПОДКЛЮЧАЕМ ВСЕ ЧАСТИ (ПОРЯДОК ВАЖЕН)
+    # Сначала фильтры и рулетка
+    dp.include_router(moderation.router)
+    # Потом игры и дуэли
+    dp.include_router(games.router)
+    # Потом админка
+    dp.include_router(admin.router)
+    # Потом ИИ
+    dp.include_router(ai.router)
+    # В конце общие команды
+    dp.include_router(user.router)
+
+    # Загружаем недоигранные дуэли из файла
+    try:
+        loaded = load_duels()
+        ACTIVE_DUELS.update(loaded)
+        print(f"✅ Загружено дуэлей из кэша: {len(loaded)}")
+    except:
+        print("ℹ️ Кэш дуэлей пуст")
+
+    # Настройка планировщика (утренний войс)
     scheduler = AsyncIOScheduler()
-    scheduler.add_job(send_morning_voice, "cron", hour=7, minute=0, timezone=pytz.timezone("Europe/Moscow"))
+    scheduler.add_job(send_morning_voice, "cron", hour=7, minute=0, args=[bot])
     scheduler.start()
-    
-    # Фоновые задачи
-    asyncio.create_task(check_silence_loop())
-    
+
+    print(f"🚀 Бот запущен! Время: {datetime.now()}")
+    await log_to_owner(bot, "🤖 Бот успешно перезагружен и готов к бою!")
+
+    # Чистим старые сообщения и запускаем
+    await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("⭕ Бот остановлен")
